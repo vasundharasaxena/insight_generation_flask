@@ -51,9 +51,14 @@ Follow these steps to set up the project locally:
    pip install -r requirements.txt
 
 4. **Run the application**:
-```
-python app.py
+   ```
+   python app.py
 
+
+## Usage
+1. Enter your query in the search box and click "SEND."
+2. View insights generated from your query in the "Insights" section.
+3. Visualize data in the chart area for a comprehensive understanding.
 
 
 
