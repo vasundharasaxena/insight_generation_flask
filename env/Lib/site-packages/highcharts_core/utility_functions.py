@@ -1,0 +1,936 @@
+"""Collection of utility functions used across the library."""
+import csv
+import datetime
+import os
+import string
+import random
+import typing
+from collections import UserDict
+
+from validator_collection import validators, checkers
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+from highcharts_core import errors, constants
+
+
+def get_random_string(length = 6):
+    """Generate a short random alphanumeric string.
+    
+    :param length: The length of the string to generate. Defaults to ``8``.
+    :type length: :class:`int <python:int>`
+    
+    :returns: A random alphanumeric string of length ``length``.
+    :rtype: :class:`str <python:str>`
+    """
+    length = validators.integer(length, minimum = 1)
+    result = ''.join(random.choices(string.ascii_uppercase + string.digits,
+                                    k = length))
+
+    return str(result)
+
+
+def mro_to_dict(obj):
+    """Work through ``obj``'s multiple parent classes, executing the appropriate
+    ``to_dict()`` method for each parent and consolidaitng the results to a single
+    :class:`dict <python:dict>`.
+
+    :param obj: An object that has a ``to_dict()`` method.
+
+    :rtype: :class:`dict <python:dict>`
+    """
+    if not hasattr(obj, 'to_dict'):
+        raise TypeError('obj does not have a to_dict() method.')
+
+    classes = [x for x in obj.__class__.mro()
+               if x.__name__ != 'object']
+    as_dict = {}
+
+    for item in classes:
+        has_to_dict = hasattr(super(item, obj), 'to_dict')
+        if not has_to_dict:
+            break
+
+        try:
+            item_dict = super(item, obj).to_dict()
+        except (NotImplementedError, AttributeError):
+            continue
+        for key in item_dict:
+            as_dict[key] = item_dict[key]
+
+    return as_dict
+
+
+def get_remaining_mro(cls,
+                      in_cls = None,
+                      method = '_to_untrimmed_dict'):
+    """Retrieve the remaining classes that should be processed for ``method`` when
+    traversing ``cls``.
+
+    :param cls: The class whose ancestors are being traversed.
+    :type cls: :class:`HighchartsMeta`
+
+    :param in_cls: The class that the traversal currently finds itself in. Defaults to
+      :obj:`None <python:None>`
+    :type in_cls: ``type`` or :obj:`None <python:None>`
+
+    :param method: The method to search for in the MRO. Defaults to
+      ``'_to_untrimmed_dict'``.
+    :type method: :class:`str <python:str>`
+
+    :returns: List of classes that have ``method`` that occur *after* ``in_cls`` in
+      the MRO for ``cls``.
+    :rtype: :class:`list <python:list>` of ``type`` objects
+    """
+    mro = [x for x in cls.mro()
+           if hasattr(x, method) and x.__name__ != 'HighchartsMeta']
+    if in_cls is None:
+        return mro[1:]
+    else:
+        index = mro.index(in_cls)
+        return mro[(index + 1):]
+
+
+def mro__to_untrimmed_dict(obj, in_cls = None):
+    """Traverse the ancestor classes of ``obj`` and execute their ``_to_untrimmed_dict()``
+    methods.
+
+    :param obj: The object to be traversed.
+    :type obj: :class:`HighchartsMeta`
+
+    :param in_cls: The class from which ``mro__to_untrimmed_dict()`` was called.
+    :type in_cls: ``type`` or :obj:`None <python:None>`
+
+    :returns: Collection of untrimmed :class:`dict <python:dict>` representations in the
+      same order as the MRO.
+    :rtype: :class:`list <python:list>` of :class:`dict <python:dict>`
+
+    for each class in the MRO, execute _to_untrimmed_dict()
+    do not repeat for each class
+    """
+    cls = obj.__class__
+    remaining_mro = get_remaining_mro(cls,
+                                      in_cls = in_cls,
+                                      method = '_to_untrimmed_dict')
+
+    ancestor_dicts = []
+    for x in remaining_mro:
+        if hasattr(x, '_to_untrimmed_dict') and x != cls:
+            ancestor_dicts.append(x._to_untrimmed_dict(obj,
+                                                       in_cls = x))
+
+    consolidated = {}
+    for item in ancestor_dicts:
+        for key in item:
+            consolidated[key] = item[key]
+
+    return consolidated
+
+
+def validate_color(value):
+    """Validate that ``value`` is either a :class:`Gradient`, :class:`Pattern`, or a
+    :class:`str <python:str>`.
+
+    :param value: The value to validate.
+
+    :returns: The validated value.
+    :rtype: :class:`str <python:str>`, :class:`Gradient`, :class:`Pattern``, or
+      :obj:`None <python:None>`
+    """
+    from highcharts_core.utility_classes.gradients import Gradient
+    from highcharts_core.utility_classes.patterns import Pattern
+
+    if not value:
+        return None
+    elif value.__class__.__name__ == 'EnforcedNullType':
+        return value
+    elif isinstance(value, (Gradient, Pattern)):
+        return value
+    elif isinstance(value, (dict, str)) and ('linearGradient' in value or
+                                             'radialGradient' in value):
+        try:
+            value = Gradient.from_json(value)
+        except (TypeError, ValueError):
+            if isinstance(value, dict):
+                value = Gradient.from_dict(value)
+            else:
+                value = validators.string(value)
+    elif isinstance(value, dict) and ('linear_gradient' in value or
+                                      'radial_gradient' in value):
+        value = Gradient(**value)
+    elif isinstance(value, (dict, str)) and ('patternOptions' in value or
+                                             'pattern' in value):
+        try:
+            value = Pattern.from_json(value)
+        except (TypeError, ValueError):
+            if isinstance(value, dict):
+                value = Pattern.from_dict(value)
+            else:
+                value = validators.string(value)
+    elif isinstance(value, dict) and 'pattern_options' in value:
+        value = Pattern(**value)
+    elif isinstance(value, str):
+        value = validators.string(value)
+    else:
+        raise errors.HighchartsValueError(f'Unable to resolve value to a string, '
+                                          f'Gradient, or Pattern. Value received '
+                                          f'was: {value}')
+
+    return value
+
+
+def to_camelCase(snake_case):
+    """Convert ``snake_case`` to ``camelCase``.
+
+    :param snake_case: A :class:`str <python:str>` which is likely to contain
+      ``snake_case``.
+    :type snake_case: :class:`str <python:str>`
+
+    :returns: A ``camelCase`` representation of ``snake_case``.
+    :rtype: :class:`str <python:str>`
+    """
+    if not snake_case:
+        raise errors.HighchartsValueError(f'snake_case cannot be empty')
+    
+    snake_case = str(snake_case)
+
+    if '_' not in snake_case:
+        return snake_case
+
+    if 'url' in snake_case:
+        snake_case = snake_case.replace('url', 'URL')
+    elif 'utc' in snake_case:
+        snake_case = snake_case.replace('utc', 'UTC')
+    elif '_csv' in snake_case:
+        snake_case = snake_case.replace('csv', 'CSV')
+    elif '_jpeg' in snake_case:
+        snake_case = snake_case.replace('jpeg', 'JPEG')
+    elif '_pdf' in snake_case:
+        snake_case = snake_case.replace('pdf', 'PDF')
+    elif '_png' in snake_case:
+        snake_case = snake_case.replace('png', 'PNG')
+    elif '_svg' in snake_case:
+        snake_case = snake_case.replace('svg', 'SVG')
+    elif '_xls' in snake_case:
+        snake_case = snake_case.replace('xls', 'XLS')
+    elif '_atr' in snake_case:
+        snake_case = snake_case.replace('atr', 'ATR')
+    elif '_hlc' in snake_case:
+        snake_case = snake_case.replace('hlc', 'HLC')
+    elif '_ohlc' in snake_case:
+        snake_case = snake_case.replace('ohlc', 'OHLC')
+    elif '_xy' in snake_case:
+        snake_case = snake_case.replace('xy', 'XY')
+    elif snake_case.endswith('_x'):
+        snake_case = snake_case.replace('_x', '_X')
+    elif snake_case.endswith('_y'):
+        snake_case = snake_case.replace('_y', '_Y')
+    elif snake_case.endswith('_id'):
+        snake_case = snake_case.replace('_id', '_ID')
+    elif snake_case == 'drillup_text':
+        snake_case = 'drillUpText'
+    elif snake_case == 'drillup_button':
+        snake_case = 'drillUpButton'
+    elif snake_case == 'thousands_separator':
+        snake_case = 'thousandsSep'
+    elif snake_case == 'measure_xy':
+        snake_case = 'measureXY'
+    elif snake_case == 'use_gpu_translations':
+        snake_case = 'useGPUTranslations'
+    elif snake_case == 'label_rank':
+        snake_case = 'labelrank'
+    elif '_di_line' in snake_case:
+        snake_case = snake_case.replace('_di_line', '_DILine')
+
+    camel_case = ''
+    previous_character = ''
+    for character in snake_case:
+        if character != '_' and previous_character != '_':
+            camel_case += character
+            previous_character = character
+        elif character == '_':
+            previous_character = character
+        elif character != '_' and previous_character == '_':
+            camel_case += character.upper()
+            previous_character = character
+
+    return camel_case
+
+
+def to_snake_case(camel_case) -> str:
+    """Convert ``camelCase`` to ``snake_case``.
+
+    :param camel_case: A :class:`str <python:str>` which is likely to contain
+      ``camelCase``.
+    :type camel_case: :class:`str <python:str>`
+
+    :returns: A ``snake_case`` representation of ``camel_case``.
+    :rtype: :class:`str <python:str>`
+    """
+    camel_case = validators.string(camel_case)
+
+    snake_case = ''
+    previous_character = ''
+    for character in camel_case:
+        if character.isupper() and not previous_character.isupper():
+            snake_case += f'_{character.lower()}'
+        elif character.isupper() and previous_character.isupper():
+            snake_case += character.lower()
+        elif character.isupper() and not previous_character:
+            snake_case += character.lower()
+        else:
+            snake_case += character
+
+        previous_character = character
+
+    return snake_case
+
+
+def parse_csv(csv_data,
+              has_header_row = True,
+              delimiter = ',',
+              null_text = 'None',
+              wrapper_character = "'",
+              wrap_all_strings = False,
+              double_wrapper_character_when_nested = False,
+              escape_character = "\\",
+              line_terminator = '\r\n'):
+    """Parse ``csv_data`` to return a list of :class:`dict <python:dict>` objects, one
+    for each record.
+
+    :param csv_data: The CSV record expressed as a :class:`str <python:str>`
+    :type csv_data: :class:`str <python:str>`
+
+    :param delimiter: The delimiter used between columns. Defaults to ``,``.
+    :type delimiter: :class:`str <python:str>`
+
+    :param wrapper_character: The string used to wrap string values when
+      wrapping is applied. Defaults to ``'``.
+    :type wrapper_character: :class:`str <python:str>`
+
+    :param null_text: The string used to indicate an empty value if empty
+      values are wrapped. Defaults to `None`.
+    :type null_text: :class:`str <python:str>`
+
+    :returns: Collection of column names (or numerical keys) and CSV records as
+      :class:`dict <python:dict>` values
+    :rtype: :class:`tuple <python:tuple>` of a :class:`list <python:list>` of column names
+      and :class:`list <python:list>` of :class:`dict <python:dict>`
+    """
+    if not csv_data:
+        return [], []
+
+    if isinstance(csv_data, str):
+        csv_data = csv_data.split(line_terminator)
+
+    if not wrapper_character:
+        wrapper_character = "'"
+
+    if wrap_all_strings:
+        quoting = csv.QUOTE_NONNUMERIC
+    else:
+        quoting = csv.QUOTE_MINIMAL
+
+    if 'highcharts' in csv.list_dialects():
+        csv.unregister_dialect('highcharts')
+
+    csv.register_dialect('highcharts',
+                         delimiter = delimiter,
+                         doublequote = double_wrapper_character_when_nested,
+                         escapechar = escape_character,
+                         quotechar = wrapper_character,
+                         quoting = quoting,
+                         lineterminator = line_terminator)
+
+    if has_header_row:
+        csv_reader = csv.DictReader(csv_data,
+                                    dialect = 'highcharts',
+                                    restkey = None,
+                                    restval = None)
+        records_as_dicts = [x for x in csv_reader]
+        columns = csv_reader.fieldnames
+    else:
+        csv_reader = csv.reader(csv_data,
+                                dialect = 'highcharts')
+        records_as_dicts = []
+        columns = []
+        for row in csv_reader:
+            record_as_dict = {}
+            column_counter = 0
+            for column in row:
+                record_as_dict[column_counter] = column
+                columns.append(column_counter)
+                column_counter += 1
+
+            records_as_dicts.append(record_as_dict)
+
+    return columns, records_as_dicts
+
+
+def jupyter_add_script(url, is_last = False, use_require = False):
+    """Generates the JavaScript code Promise which adds a <script/> tag to the Jupyter 
+    Lab environment.
+    
+    :param url: The URL to use for the script's source.
+    :type url: :class:`str <python:str>`
+    
+    :param is_last: Whether the URL is the last of the promises.
+    :type is_last: :class:`bool <python:bool>`
+    
+    :param use_require: Whether to return the script needed for RequireJS.
+      Defaults to ``False``.
+    :type use_require: :class:`bool <python:bool>`
+    
+    :returns: The JavaScript code for adding the script.
+    :rtype: :class:`str <python:str>`
+    """
+    url = validators.url(
+        url, allow_special_ips=os.getenv("HCP_ALLOW_SPECIAL_IPS", False)
+    )
+    if url.endswith('.css'):
+        return jupyter_add_link(url, is_last = is_last)
+
+    js_str = """"""
+    
+    if use_require:
+        js_str += f"""require(['{url}'], function() """
+        js_str += """{\n"""
+        if is_last:
+            js_str += """});"""
+    else:
+        js_str += """new Promise(function(resolve, reject) {\n"""
+        js_str += f"""  var existing_tags = document.querySelectorAll("script[src='{url}']");"""
+        js_str += """  if (existing_tags.length == 0) {
+            var script = document.createElement("script");
+            script.onload = resolve;
+            script.onerror = reject;"""
+        js_str += f"""        script.src = '{url}';"""
+        js_str += """        document.head.appendChild(script);
+        } else { resolve() };
+    })"""
+
+    return js_str
+
+
+def jupyter_add_link(url, is_last = False):
+    """Generates the JavaScript code Promise which adds a <link/> tag to the Jupyter 
+    Lab environment.
+    
+    :param url: The URL to use for the link's source.
+    :type url: :class:`str <python:str>`
+    
+    :param is_last: Whether the URL is the last of the promises.
+    :type is_last: :class:`bool <python:bool>`
+    
+    :returns: The JavaScript code for adding the link.
+    :rtype: :class:`str <python:str>`
+    """
+    url = validators.url(
+        url, allow_special_ips=os.getenv("HCP_ALLOW_SPECIAL_IPS", False)
+    )
+    
+    js_str = ''
+    js_str += """new Promise(function(resolve, reject) {\n"""
+    js_str += f"""  var existing_tags = document.querySelectorAll("link[href='{url}']");"""
+    js_str += """  if (existing_tags.length == 0) {
+        var link = document.createElement("link");
+        link.onload = resolve;
+        link.onerror = reject;"""
+    js_str += f"""        link.href = '{url}';"""
+    js_str += f"""        link.rel = 'stylesheet';"""
+    js_str += f"""        link.type = 'text/css';"""
+    js_str += """        document.head.appendChild(link);
+    } else { resolve() };
+})"""
+
+    return js_str
+
+
+def get_retryHighcharts():
+    """Retrieve the ``retryHighcharts()`` JavaScript function.
+    
+    :returns: The JavaScript code of the ``retryHighcharts()`` JavaScript function.
+    :rtype: :class:`str <python:str>`
+    """
+    js_str = """function retryHighcharts(fn, container = 'highcharts_target_div', retries = 5, retriesLeft = 5, 
+        interval = 1000) {
+            return new Promise((resolve, reject) => {
+            try {
+                fn()
+                return resolve();
+            } catch (err) {
+                if ((err instanceof ReferenceError) || (err instanceof TypeError) || (err.message.includes('#17'))) {
+                    if (retriesLeft === 0) {
+                        var target_div = document.getElementById(container);
+                        if (target_div) {
+                            var timeElapsed = (retries * interval) / 1000;
+                            var errorMessage = "Something went wrong with the Highcharts.js script. It should have been automatically loaded, but it did not load for over " + timeElapsed + " seconds. Check your internet connection, and then if the problem persists please reach out for support. (You can also check your browser's console log for more details.)<br/><br/>Detailed Error Message:<br/>" + err.message;
+                            var errorHTML = errorMessage;
+                            
+                            target_div.innerHTML = errorHTML;
+                            console.log(errorMessage);
+                            console.error(err);
+                        }
+                        return reject();
+                    }
+
+                    setTimeout(() => {
+                        retryHighcharts(fn, container, retries, retriesLeft - 1, interval).then(resolve).catch(reject);
+                    }, interval);
+                } else if ((err instanceof Error) && (err.message.includes('#13'))) {
+                    var errorMessage = "It looks like the container specified \'" + container + "\' was not created successfully. Please check your browser\'s console log for more details.";
+                    console.error(errorMessage);
+                    console.error(err);
+                    
+                    return reject();
+                } else {
+                    throw err;
+                }
+            }
+        });
+    };"""
+    
+    return js_str
+
+
+def prep_js_for_jupyter(js_str,
+                        container = 'highcharts_target_div',
+                        random_slug = None,
+                        retries = 5,
+                        interval = 1000):
+    """Remove the JavaScript event listeners from the code in ``js_str`` and prepare the
+    JavaScript code for rending in an IPython context.
+    
+    :param js_str: The JavaScript code from which the event listeners should be stripped.
+    :type js_str: :class:`str <python:str>`
+    
+    :param container: The DIV where the Highcharts visualization is to be rendered. Defaults to
+      ``'highcharts_target_div'``.
+    :type container: :class:`str <python:str>`
+    
+    :param random_slug: The random sequence of characters to append to the container/function name to ensure uniqueness.
+        Defaults to :obj:`None <python:None>`
+    :type random_slug: :class:`str <python:str>` or :obj:`None <python:None>`
+
+    :param retries: The number of times to retry the rendering. Defaults to 3.
+    :type retries: :class:`int <python:int>`
+    
+    :param interval: The number of milliseconds to wait between retries. Defaults to 1000 (1 second).
+    :type interval: :class:`int <python:int>`
+    
+    :returns: The JavaScript code having removed the non-Jupyter compliant JS code.
+    :rtype: :class:`str <python:str>`
+    """
+    js_str = js_str.replace(
+        """document.addEventListener('DOMContentLoaded', function() {""", '')
+    js_str = js_str.replace('renderTo = ', '')
+    js_str = js_str.replace(',\noptions = ', ',\n')
+    if '.setOptions(' not in js_str:
+        js_str = js_str[:-3]
+
+    if random_slug:
+        function_str = f"""function insertChart_{random_slug}() """
+    else:
+        function_str = """function insertChart() """
+    function_str += """{\n"""
+    function_str += js_str
+    function_str += """\n};\n"""
+    if random_slug:
+        function_str += f"""retryHighcharts(insertChart_{random_slug}, '{container}', {retries}, {retries}, {interval});"""
+    else:
+        function_str += f"""retryHighcharts(insertChart, '{container}', {retries}, {retries}, {interval});"""
+
+    return function_str
+
+
+def wrap_for_requirejs(if_require_js, if_no_requirejs = None):
+    """Wrap ``if_require_js`` in a conditional JavaScript ``if ... { }`` statement
+    that evalutes whether RequireJS is present in the browser.
+    
+    :param if_require_js: The (JavaScript) code that should be executed if RequireJS
+      *is* present.
+    :type if_require_js: :class:`str <python:str>`
+    
+    :param if_no_require_js: The (JavaScript) code that should be executed if RequireJS
+      is *not* present. Defaults to :obj:`None <python:None>` (nothing gets executed).
+    :type if_no_require_js: :class:`str <python:str>`
+    """
+    js_str = """var has_requirejs = typeof requirejs !== 'undefined';\n"""
+    js_str += """if (has_requirejs) {\n"""
+    js_str += if_require_js + '\n}'
+    
+    if if_no_requirejs:
+        js_str += """ else {\n"""
+        js_str += if_no_requirejs + '\n}'
+        
+    js_str += ';'
+    
+    return js_str
+
+
+def to_ndarray(value):
+    """Convert ``value`` to a :class:`numpy.ndarray <numpy:numpy.ndarray>`.
+    
+    :param value: The value to be converted. Expects the value to be an iterable.
+    :type value: iterable
+    
+    :raises HighchartsDependencyError: if NumPy is not installed
+    
+    :returns: A :class:`numpy.ndarray <numpy:numpy.ndarray>` representation of 
+      ``value``.
+    :rtype: :class:`numpy.ndarray <numpy:numpy.ndarray>`
+    
+    """
+    if not HAS_NUMPY:
+        raise errors.HighchartsDependencyError('NumPy is required for this feature. '
+                                               'It was not found in the runtime environment. '
+                                               'Please install it using "pip install numpy" '
+                                               'or equivalent.')
+
+    for i, item in enumerate(value):
+        is_iterable = not isinstance(item,
+                                     (str, bytes, dict, UserDict)) and hasattr(item, 
+                                                                               '__iter__')
+        if item is None or isinstance(item, constants.EnforcedNullType):
+            value[i] = np.nan
+        elif is_iterable:
+            for index, subitem in enumerate(item):
+                if subitem is None or isinstance(subitem, constants.EnforcedNullType):
+                    item[i] = np.nan
+            value[i] = item
+
+    if hasattr(value, '__array__'):
+        as_array = np.array(value)
+    else:
+        as_array = np.asarray(value)
+
+    return as_array
+
+
+def to_ndarray_dict(keys, as_iterable):
+    """Convert ``as_iterable`` into a :class:`dict <python:dict>`
+    whose keys align to the values in ``keys``, and whose values
+    are :class:`numpy.ndarray <numpy:numpy.ndarray>` instances
+    corresponding to the index in ``as_iterable``.
+    
+    :param keys: The collection of keys to use for the resulting
+      :class:`dict <python:dict>`.
+    :type keys: iterable of :class:`str <python:str>`
+    
+    :param as_iterable: The collection of values to be converted
+      to :class:`numpy.ndarray <numpy:numpy.ndarray>` instances
+    :type as_iterable: iterable
+    
+    :returns: A :class:`dict <python:dict>` whose keys are values
+      from ``keys``, and whose values are items from ``as_iterable``
+      with each item converted to a 
+      :class:`numpy.ndarray <numpy:numpy.ndarray>`
+    :rtype: :class:`dict <python:dict>`
+    
+    :raises HighchartsValueError: if ``keys`` and ``as_iterable``
+      have different lengths
+    """
+    keys = validators.iterable(keys,
+                               allow_empty = False,
+                               forbid_literals = (str, bytes, dict, UserDict))
+    as_iterable = validators.iterable(as_iterable,
+                                      allow_empty = False,
+                                      forbid_literals = (str, bytes, dict, UserDict))
+    if len(keys) != len(as_iterable):
+        raise errors.HighchartsValueError(f'keys and as_iterable must have the same '
+                                          f'length. Received: {len(keys)} for keys,'
+                                          f'{len(as_iterable)} for as_iterable ')
+        
+    as_dict = {}
+    for index, key in enumerate(keys):
+        as_dict[key] = to_ndarray(as_iterable[index])
+        
+    return as_dict
+
+
+def from_ndarray(as_ndarray, force_enforced_null = False):
+    """Convert ``as_ndarray`` to a Python :class:`list <python:list>`.
+    
+    :param as_ndarray: The :class:`numpy.ndarray <numpy:numpy.ndarray>` 
+      to be converted.
+    :type as_ndarray: :class:`numpy.ndarray <numpy:numpy.ndarray>`
+    
+    :param force_enforced_null: if ``True``, converts any 
+      :class:`numpy.nan <numpy:numpy.nan>` values to :obj:`EnforcedNull`.
+      Otherwise, converts them to :obj:`None <python:None>`. Defaults to 
+      ``False``.
+    :type force_enforced_null: :class:`bool <python:bool>`
+    
+    :raises HighchartsDependencyError: if NumPy is not installed
+    :raises HighchartsValueError: if ``as_ndarray`` is not a 
+      :class:`numpy.ndarray <numpy:numpy.ndarray>`
+    
+    :returns: The Python :class:`list <python:list>` representation of
+      ``as_ndarray``.
+    :rtype: :class:`list <python:list>`
+    
+    """
+    if not HAS_NUMPY:
+        raise errors.HighchartsDependencyError('NumPy is required for this feature. '
+                                               'It was not found in the runtime environment. '
+                                               'Please install it using "pip install numpy" '
+                                               'or equivalent.')
+
+    if not isinstance(as_ndarray, np.ndarray):
+        raise errors.HighchartsValueError(f'as_ndarray is expected to be a NumPy ndarray. '
+                                          f'Received: {as_ndarray.__class__.__name__}')
+
+    if force_enforced_null:
+        nan_replacement = constants.EnforcedNull
+    else:
+        nan_replacement = None
+
+    if as_ndarray.dtype.char not in ['O', 'U']:
+        stripped = np.where(np.isnan(as_ndarray), nan_replacement, as_ndarray)
+    else:
+        prelim_stripped = as_ndarray.tolist()
+        stripped = []
+        for item in prelim_stripped:
+            if item == np.nan:
+                stripped.append(nan_replacement)
+            else:
+                stripped.append(item)
+                
+        return stripped
+
+    return stripped.tolist()
+
+
+def get_ndarray_slice(array, index):
+    """Return the slice of ``array`` at ``index``.
+    
+    :param array: A `NumPy <https://numpy.org>`__ :class:`ndarray <numpy:numpy.ndarray>`
+      instance or a Python iterable.
+    :type array: :class:`numpy.ndarray <numpy:numpy.ndarray>` or iterable
+    
+    :param index: The 0-based index of the column to return from ``array``.
+    
+      .. note::
+      
+        If ``index`` exceeds the number of dimensions in ``array``, then
+        an empty collection of values should be returned, with the number
+        of empty values matching the length of the ``array``.
+        
+    :type index: :class:`int <python:int>`
+    
+    :returns: A collection of values.
+    :rtype: :class:`numpy.ndarray <numpy:numpy.ndarray>`
+      or :class:`list <python:list>`
+
+    """
+    index = validators.integer(index, minimum = 0, allow_none = False)
+    if HAS_NUMPY and isinstance(array, np.ndarray):
+        if index < array.shape[1]:
+            return array[:, index]
+        else:
+            len_array = array.shape[0]
+    
+            return np.full((len_array, 1), np.nan)
+    else:
+        array = validators.iterable(array, 
+                                    allow_empty = True, 
+                                    forbid_literals = (str, bytes, dict, UserDict)) or []
+    
+    return [x[index] for x in array]
+
+
+def lengthen_array(value, members):
+    """Create a NumPy :class:`ndarray <numpy:numpy.ndarray>` from 
+    ``value`` where the result has ``members``.
+    
+    :param value: The array-like value to be inserted into the resulting array.
+    
+      .. note::
+      
+        If an :class:`int <python:int>` is supplied, the value will be repeated all
+        ``members``.
+    
+    :type value: Array-like or :class:`int <python:int>`
+    
+    :param members: The number of members the resulting ``value`` expects.
+    :type members: :class:`int <python:int>`
+    
+    :returns: A NumPy :class:`ndarray <numpy:numpy.ndarray>` of length ``members``.
+    :rtype: :class:`numpy.ndarray <numpy:numpy.ndarray>`
+    
+    :raises HighchartsDependencyError: if NumPy is not available in the runtime
+      environment
+    :raises HighchartsValueError: if ``value`` has more members than ``members``
+
+    """
+    if not HAS_NUMPY:
+        raise errors.HighchartsDependencyError('NumPy is required for this feature. '
+                                               'It was not found in your runtime '
+                                               'environment. Please make sure it is '
+                                               'installed in your runtime '
+                                               'environment.')
+
+    is_ndarray = isinstance(value, np.ndarray)
+    is_list = False
+    if not is_ndarray:
+        is_list = checkers.is_iterable(value,
+                                       forbid_literals = (str, bytes, dict, UserDict),
+                                       allow_empty = False)
+    is_int = False
+    if not is_ndarray and not is_list:
+        value = validators.integer(value, allow_empty = None)
+        is_int = True
+
+    if is_list:
+        value = np.asarray(value)
+    elif is_int:
+        value = np.full((members, 1), value)
+
+    if len(value) > members:
+        raise errors.HighchartsValueError(f'Value has more members than specified. '
+                                          f'Received: {len(value)}. Expected up to: '
+                                          f'{members}.')
+    elif len(value) < members:
+        members_to_add = members - len(value)
+    else:
+        members_to_add = 0
+
+    if members_to_add:
+        try:
+            value = np.vstack((value, np.full((members_to_add, value.shape[1]), np.nan)))
+        except IndexError:
+            value = np.vstack((value, np.full((members_to_add, value.ndim), np.nan)))
+
+    return value
+
+
+def is_iterable(value) -> bool:
+    """Evaluate whether ``value`` is iterable, with support for NumPy arrays.
+    
+    :param value: The value to evaluate.
+    :type value: Any
+    
+    :returns: ``True`` if iterable, ``False`` if not
+    :rtype: :class:`bool <python:bool>`
+    """
+    return checkers.is_type(value, 'ndarray') or \
+        (not isinstance(value,
+                        (str, bytes, dict, UserDict)) and hasattr(value, '__iter__'))
+
+
+def is_arraylike(value) -> bool:
+    """Evaluate whether ``value`` is a NumPy array or a Python iterable.
+    
+    :param value: The value to evaluate.
+    :type value: Any
+    
+    :raises HighchartsDependencyError: if NumPy is not available in the runtime
+      environment
+    
+    :returns: ``True`` if an array or array-like. ``False`` if not.
+    :rtype: :class:`bool <python:bool>`
+    """
+    if not HAS_NUMPY:
+        return is_iterable(value)
+
+    return isinstance(value, np.ndarray) or is_iterable(value)
+
+
+def is_ndarray(value) -> bool:
+    """Evaluate whether ``value`` is a NumPy :class:`ndarray <numpy:numpy.ndarray>`.
+    
+    :param value: The value to evaluate.
+    :type value: Any
+    
+    :returns: ``True`` if an array. ``False`` if not.
+    :rtype: :class:`bool <python:bool>`
+    """
+    if value.__class__.__name__ == 'ndarray':
+        return True
+    classes = [x.__name__ for x in value.__class__.__mro__]
+    
+    return 'ndarray' in classes
+
+
+def extend_columns(array, needed_members):
+    """Extends ``array`` with additional positions for the number 
+    of members to equal ``needed_members``. Additional positions recieve
+    a value of :obj:`None <python:None>`.
+    
+    :param array: The array to extend
+    :type array: iterable
+    
+    :param needed_members: the number of members the array should contain
+    :type needed_members: :class:`int <python:int>`
+    
+    :returns: ``array`` with ``needed_members``
+    :rtype: iterable
+    """
+    if not is_arraylike(array):
+        raise errors.HighchartsValueError(f'array is expected to be an iterable. '
+                                          f'Received a: {array.__class__.__name__}')
+
+    needed_members = validators.integer(needed_members)
+
+    original_length = len(array)
+    if needed_members <= original_length:
+        return array
+
+    new_members = original_length - needed_members
+    array.extend([None for x in range(new_members)])
+
+    return array
+
+
+def dict_to_ndarray(as_dict):
+    """Convert ``as_dict`` to a :class:`numpy.ndarray <numpy:numpy.ndarray>`,
+    with each key becoming a column.
+    
+    :param as_dict: :class:`dict <python:dict>` to be converted
+    :type as_dict: :class:`dict <python:dict>`
+    
+    :returns: :class:`numpy.ndarray <numpy:numpy.ndarray>` with 1 column
+      per key in ``as_dict``
+    :rtype: :class:`numpy.ndarray <nunpy:numpy.ndarray>`
+    
+    """
+    if not HAS_NUMPY:
+        raise errors.HighchartsDependencyError('NumPy is required for this feature. '
+                                               'It was not found in your runtime '
+                                               'environment. Please make sure it is '
+                                               'installed in your runtime '
+                                               'environment.')
+
+    as_dict = validators.dict(as_dict, allow_empty = True) or {}
+    columns = [as_dict[key] for key in as_dict]
+    as_ndarray = np.column_stack(columns)
+
+    return as_ndarray
+
+
+def datetime64_to_datetime(dt64):
+    """Convert a NumPy :class:`datetime64 <numpy:numpy.datetime64>` to a Python 
+    :class:`datetime <python:datetime.datetime>`.
+    
+    :param dt64: The NumPy :class:`datetime64 <numpy:numpy.datetime64>` to convert.
+    :type dt64: :class:`numpy.datetime64 <numpy:numpy.datetime64>`
+    
+    :returns: A Python :class:`datetime <python:datetime.datetime>` instance.
+    :rtype: :class:`datetime <python:datetime.datetime>`
+    
+    :raises HighchartsDependencyError: if NumPy is not available in the runtime
+      environment
+
+    """
+    if not HAS_NUMPY:
+        raise errors.HighchartsDependencyError('NumPy is required for this feature. '
+                                               'It was not found in your runtime '
+                                               'environment. Please make sure it is '
+                                               'installed in your runtime '
+                                               'environment.')
+    timestamp = (dt64 - np.datetime64("1970-01-01T00:00:00")) / np.timedelta64(1, "s")
+    
+    return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc)

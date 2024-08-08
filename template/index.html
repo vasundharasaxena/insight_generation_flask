@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Auto Insights</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://code.highcharts.com/highcharts.js"></script>
+    <script src="https://code.highcharts.com/highcharts-more.js"></script>
+    <script src="https://code.highcharts.com/modules/heatmap.js"></script>
+    <script src="https://code.highcharts.com/modules/exporting.js"></script>
+    <script src="https://code.highcharts.com/modules/offline-exporting.js"></script>
+
+</head>
+<body>
+    <div class="header">AUTO INSIGHTS</div>
+    <div class="container">
+        <form method="POST" action="/">
+            <input type="search" name="query" placeholder="Enter your query">
+            <button type="submit">SEND</button>
+        </form>
+    </div>
+    <div class="flex-container">
+        <div class="output-container" id="output">
+            <h3>Insights:</h3>
+            <br>
+        </div>
+        <div class="graph-container" id="graphContainer"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='Functions.js') }}"></script>
+    <script>
+        var serverOutput = '{{ output_json | tojson | safe }}';
+        // console.log("Type of serverOutput:", typeof serverOutput);
+        // console.log("serverOutput value:", serverOutput);
+    if (typeof serverOutput === 'string') {
+        // console.log("serverOutput is a string, attempting to parse");
+
+        var parsedOutput = JSON.parse(serverOutput);
+        // console.log("Parsed output:", parsedOutput);
+        serverOutput = parsedOutput;
+    }
+        
+        
+    </script>
+</body>
+</html>
