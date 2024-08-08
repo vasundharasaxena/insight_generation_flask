@@ -40,3 +40,36 @@ Follow these steps to set up the project locally:
    ```bash
    git clone https://github.com/YOUR_GITHUB_USERNAME/insight_generation_flask.git
    cd insight_generation_flask
+
+2. **Set up a virtual environment**:
+   ```
+   python -m venv venv
+   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+
+3. **Install dependencies**:
+   ```
+   pip install -r requirements.txt
+
+4. **Run the application**:
+```
+python app.py
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   
+
